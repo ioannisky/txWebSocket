@@ -11,10 +11,13 @@ WebSocket server protocol.
 See U{http://tools.ietf.org/html/draft-hixie-thewebsocketprotocol} for the
 current version of the specification.
 
+Changes to make it compatible with:
+https://tools.ietf.org/html/rfc6455
+
 @since: 10.1
 """
 
-from hashlib import md5
+from hashlib import md5,sha1
 import struct
 
 from twisted.internet import interfaces
@@ -22,6 +25,8 @@ from twisted.web.http import datetimeToString
 from twisted.web.http import _IdentityTransferDecoder
 from twisted.web.server import Request, Site, version, unquote
 from zope.interface import implements
+import base64
+import struct
 
 
 _ascii_numbers = frozenset(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'])
@@ -32,6 +37,14 @@ class WebSocketRequest(Request):
     """
 
     def process(self):
+        upgrade=self.requestHeaders.getRawHeaders("Upgrade")
+        connection=self.requestHeaders.getRawHeaders("Connection")
+        if("websocket" in self.requestHeaders.getRawHeaders("Upgrade") and
+            "Upgrade" in self.requestHeaders.getRawHeaders("Connection")[0]):
+            return self.processWebSocket()
+        else:
+            return Request.process(self)
+
         if (self.requestHeaders.getRawHeaders("Upgrade") == ["WebSocket"] and
             self.requestHeaders.getRawHeaders("Connection") == ["Upgrade"]):
             return self.processWebSocket()
@@ -119,7 +132,7 @@ class WebSocketRequest(Request):
         num2 = num2 / numSpaces2
 
         transport = WebSocketTransport(self)
-        handler = handlerFactory(transport)
+        handler = handlerFactory(transport,self.requestHeaders)
         transport._attachHandler(handler)
 
         self.channel.setRawMode()
@@ -200,7 +213,7 @@ class WebSocketRequest(Request):
         if not handlerFactory:
             return finish()
         transport = WebSocketTransport(self)
-        handler = handlerFactory(transport)
+        handler = handlerFactory(transport,self.requestHeaders)
         transport._attachHandler(handler)
 
         protocolHeaders = self.requestHeaders.getRawHeaders(
@@ -216,6 +229,35 @@ class WebSocketRequest(Request):
         return originHeaders[0], hostHeaders[0], protocolHeader, handler
 
 
+    def _clientWebsocket(self):
+        isWebSS=self.requestHeaders.getRawHeaders("Sec-WebSocket-Key", [])
+        key=isWebSS[0]+"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        ke=base64.b64encode(sha1(key).digest())
+
+        check = self._checkClientHandshake()
+        originHeader, hostHeader, protocolHeader, handler = check
+        self.startedWriting = True
+        handshake = [
+                "HTTP/1.1 101 Web Socket Protocol Handshake",
+                "Upgrade: websocket",
+                "Connection: Upgrade",
+                "Sec-WebSocket-Accept: "+ke,
+                "Sec-WebSocket-Protocol: chat"]
+
+
+        for header in handshake:
+            self.write("%s\r\n" % header)
+
+        self.write("\r\n")
+        self.channel.setRawMode()
+        self.channel._transferDecoder = WebSocketFrameDecoder(
+            self, handler)
+        handler.transport._connectionMade()
+
+        return
+
+
+
     def renderWebSocket(self):
         """
         Render a WebSocket request.
@@ -226,8 +268,12 @@ class WebSocketRequest(Request):
         """
         # check for post-75 handshake requests
         isSecHandshake = self.requestHeaders.getRawHeaders("Sec-WebSocket-Key1", [])
+    	isWebSS=self.requestHeaders.getRawHeaders("Sec-WebSocket-Key", [])
         if isSecHandshake:
             self._clientHandshake76()
+        elif isWebSS:
+            self._clientWebsocket()
+            return
         else:
             check = self._checkClientHandshake()
             if check is None:
@@ -354,7 +400,22 @@ class WebSocketTransport(object):
         @param frame: a I{UTF-8} encoded C{str} to send to the client.
         @type frame: C{str}
         """
-        self._request.write("\x00%s\xff" % frame)
+        if(isinstance(frame,WebSocketFrame)):
+            self._request.write(frame.encode())
+            return
+
+        RSV1=0
+        RSV2=0
+        RSV3=0
+        opcode=1
+        b=(FIN<<7)|(RSV1<<6)|(RSV2<<5)|(RSV3<<4)|opcode
+        b=chr(b)
+        l=len(frame)
+        b+=chr(l&0x7F)
+        b+=frame
+
+
+        self._request.write(b)
 
     def writeSequence(self, frames):
         """
@@ -367,9 +428,9 @@ class WebSocketTransport(object):
         Close the connection.
         """
         self._request.transport.loseConnection()
-        del self._request.transport
-        del self._request
-        del self._handler
+        #del self._request.transport
+        #del self._request
+        #del self._handler
 
 class WebSocketHandler(object):
     """
@@ -381,11 +442,12 @@ class WebSocketHandler(object):
     @type: L{WebSocketTransport}
     """
 
-    def __init__(self, transport):
+    def __init__(self, transport,requestHeaders=None):
         """
         Create the handler, with the given transport
         """
         self.transport = transport
+        self.requestHeaders=requestHeaders
 
 
     def frameReceived(self, frame):
@@ -417,8 +479,44 @@ class WebSocketHandler(object):
         """
 
 
+class WebSocketFrame:
+    CONTINUATION=0x0
+    TEXT=0x1
+    BINARY=0x2
+    CONNECTION_CLOSE=0x8
+    PING=0x9
+    PONG=0XA
+
+    def __init__(self,opcode,message=""):
+        self.opcode=opcode
+        self.message=message
+
+
+    def encode(self):
+        FIN=1
+        RSV1=0
+        RSV2=0
+        RSV3=0
+        opcode=self.opcode
+        b=(FIN<<7)|(RSV1<<6)|(RSV2<<5)|(RSV3<<4)|opcode
+        b=chr(b)
+        l=len(self.message)
+        if(l>125):
+            pass
+        else:
+            b+=chr(l&0x7F)
+            b+=self.message
+        return b
+
+
 
 class WebSocketFrameDecoder(object):
+    CONTINUATION=0x0
+    TEXT=0x1
+    BINARY=0x2
+    CONNECTION_CLOSE=0x8
+    PING=0x9
+    PONG=0XA
     """
     Decode WebSocket frames and pass them to the attached C{WebSocketHandler}
     instance.
@@ -453,6 +551,60 @@ class WebSocketFrameDecoder(object):
         @param data: data received over the WebSocket connection.
         @type data: C{str}
         """
+        ri=0
+
+        c1=ord(data[ri])
+        ri+=1
+        c2=ord(data[ri])
+        ri+=1
+        opcode=c1&0x0F
+        mask=(c2&0x80)>>7
+        length=(c2&0x7F)
+        read_len=0
+        if(length==126):
+            read_len=2
+            length=0
+        elif(length==127):
+            read_len=8
+            length=0
+
+        for i in range(0,read_len):
+            length=(length<<8)|ord(data[ri])
+            ri+=1
+
+        if((mask==1) and ((opcode==WebSocketFrameDecoder.TEXT) or (opcode==WebSocketFrameDecoder.BINARY))):
+            mv=[ord(data[ri]),ord(data[ri+1]),ord(data[ri+2]),ord(data[ri+3])]
+            ri+=4
+            message=data[ri:]
+            dm=""
+            for i in range(0,len(message)):
+                dm+=chr(ord(message[i])^mv[i%4])
+            message=dm
+        else:
+            message=data[ri:]
+
+        if(opcode==WebSocketFrameDecoder.PING):
+            wsf=WebSocketFrame(WebSocketFrameDecoder.PONG)
+            self.handler.transport.write(wsf.encode())
+            return
+        elif(opcode==WebSocketFrameDecoder.PONG):
+            wsf=WebSocketFrame(WebSocketFrameDecoder.PONG)
+            self.handler.frameReceived(wsf)
+            return
+        elif(opcode==WebSocketFrameDecoder.CONNECTION_CLOSE):
+            #TODO: implement close
+            wsf=WebSocketFrame(WebSocketFrameDecoder.CONNECTION_CLOSE)
+            self.handler.transport.write(wsf)
+
+            #self.handler.transport.loseConnection()
+            return
+
+        self.handler.frameReceived(message)
+        return
+        #TODO: Remove the code below
+
+
+
         if not data:
             return
         while True:
@@ -486,4 +638,3 @@ class WebSocketFrameDecoder(object):
 
 
 __all__ = ["WebSocketHandler", "WebSocketSite"]
-
