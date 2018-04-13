@@ -249,6 +249,7 @@ class WebSocketRequest(Request):
             self.write("%s\r\n" % header)
 
         self.write("\r\n")
+        self.channel._handlingRequest=False
         self.channel.setRawMode()
         self.channel._transferDecoder = WebSocketFrameDecoder(
             self, handler)
@@ -300,12 +301,16 @@ class WebSocketRequest(Request):
                 self.write("%s\r\n" % header)
 
             self.write("\r\n")
+            self.channel._handlingRequest=False
             self.channel.setRawMode()
             # XXX we probably don't want to set _transferDecoder
             self.channel._transferDecoder = WebSocketFrameDecoder(
                 self, handler)
             handler.transport._connectionMade()
             return
+
+    def connectionLost(self,reason):
+        print "Connection Lost"
 
 
 
@@ -322,7 +327,7 @@ class WebSocketSite(Site):
 
     def __init__(self, resource, logPath=None, timeout=60*60*12,
                  supportedProtocols=None):
-        Site.__init__(self, resource, logPath, timeout)
+        Site.__init__(self, resource, logPath=logPath, timeout=timeout)
         self.handlers = {}
         self.supportedProtocols = supportedProtocols or []
 
@@ -502,7 +507,15 @@ class WebSocketFrame:
         b=chr(b)
         l=len(self.message)
         if(l>125):
-            pass
+            print l,2**16
+            if(l<(2**16)):
+                b+=chr(126)
+                b+=struct.pack(">H",l)
+                b+=self.message
+            else:
+                b+=chr(127)
+                b+=struct.pack(">Q",l)
+                b+=self.message
         else:
             b+=chr(l&0x7F)
             b+=self.message
@@ -595,8 +608,7 @@ class WebSocketFrameDecoder(object):
             #TODO: implement close
             wsf=WebSocketFrame(WebSocketFrameDecoder.CONNECTION_CLOSE)
             self.handler.transport.write(wsf)
-
-            #self.handler.transport.loseConnection()
+            self.handler.transport.loseConnection()
             return
 
         self.handler.frameReceived(message)
