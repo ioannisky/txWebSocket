@@ -94,7 +94,7 @@ class WebSocketRequest(Request):
         hostHeaders = self.requestHeaders.getRawHeaders("Host", [])
         if len(hostHeaders) != 1:
             return finish()
-        handlerFactory = self.site.handlers.get(self.uri)
+        handlerFactory = self.site.handlers.get(self.path)
         if not handlerFactory:
             return finish()
 
@@ -132,7 +132,7 @@ class WebSocketRequest(Request):
         num2 = num2 / numSpaces2
 
         transport = WebSocketTransport(self)
-        handler = handlerFactory(transport,self.requestHeaders)
+        handler = handlerFactory(transport,self)
         transport._attachHandler(handler)
 
         self.channel.setRawMode()
@@ -209,11 +209,11 @@ class WebSocketRequest(Request):
         if len(hostHeaders) != 1:
             return finish()
 
-        handlerFactory = self.site.handlers.get(self.uri)
+        handlerFactory = self.site.handlers.get(self.path)
         if not handlerFactory:
             return finish()
         transport = WebSocketTransport(self)
-        handler = handlerFactory(transport,self.requestHeaders)
+        handler = handlerFactory(transport,self)
         transport._attachHandler(handler)
 
         protocolHeaders = self.requestHeaders.getRawHeaders(
@@ -309,8 +309,6 @@ class WebSocketRequest(Request):
             handler.transport._connectionMade()
             return
 
-    def connectionLost(self,reason):
-        print "Connection Lost"
 
 
 
@@ -343,6 +341,14 @@ class WebSocketSite(Site):
         if not name.startswith("/"):
             raise ValueError("Invalid resource name.")
         self.handlers[name] = handlerFactory
+
+    def getHandler(self,name):
+        for k,v in self.handlers.items():
+            if(len(k)>len(name)):
+                continue
+            if(name[0:len(k)]==k):
+                return v
+        return None
 
 
 
@@ -447,12 +453,12 @@ class WebSocketHandler(object):
     @type: L{WebSocketTransport}
     """
 
-    def __init__(self, transport,requestHeaders=None):
+    def __init__(self, transport,request=None):
         """
         Create the handler, with the given transport
         """
         self.transport = transport
-        self.requestHeaders=requestHeaders
+        self.request=request
 
 
     def frameReceived(self, frame):
